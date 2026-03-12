@@ -499,6 +499,7 @@ func (ns *Impl) wrapUDPProtocolHandler(h protocolHandlerFunc) protocolHandlerFun
 
 var (
 	metricPerClientForwardLimit = clientmetric.NewCounter("netstack_tcp_forward_dropped_attempts_per_client")
+	metricKeepaliveConfigured   = clientmetric.NewCounter("netstack_tcp_keepalive_configured")
 )
 
 // wrapTCPProtocolHandler wraps the protocol handler we pass to netstack for TCP.
@@ -1528,13 +1529,25 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 		// as lingering connections to fork style daemons. On the other side of the
 		// fence, the long duration timers are low impact values for battery powered
 		// peers.
-		ep.SocketOptions().SetKeepAlive(true)
 		if d := netstackKeepaliveIdle(); d > 0 {
 			idle := tcpip.KeepaliveIdleOption(d)
-			ep.SetSockOpt(&idle)
+			if err := ep.SetSockOpt(&idle); err != nil {
+				ns.logf("netstack: SetSockOpt(KeepaliveIdle=%v) failed: %v", d, err)
+			}
 			intvl := tcpip.KeepaliveIntervalOption(d / 4)
-			ep.SetSockOpt(&intvl)
+			if err := ep.SetSockOpt(&intvl); err != nil {
+				ns.logf("netstack: SetSockOpt(KeepaliveInterval=%v) failed: %v", d/4, err)
+			}
+			// Read back to verify the endpoint actually accepted the value.
+			var readIdle tcpip.KeepaliveIdleOption
+			if err := ep.GetSockOpt(&readIdle); err != nil {
+				ns.logf("netstack: GetSockOpt(KeepaliveIdle) failed: %v", err)
+			} else if time.Duration(readIdle) != d {
+				ns.logf("netstack: KeepaliveIdle mismatch: set %v, got %v", d, time.Duration(readIdle))
+			}
+			metricKeepaliveConfigured.Add(1)
 		}
+		ep.SocketOptions().SetKeepAlive(true)
 
 		// This function is called when we're ready to use the
 		// underlying connection, and thus it's no longer in a
