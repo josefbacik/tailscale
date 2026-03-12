@@ -119,6 +119,16 @@ func maxInFlightConnectionAttemptsPerClient() int {
 
 var debugNetstack = envknob.RegisterBool("TS_DEBUG_NETSTACK")
 
+// netstackKeepaliveIdle overrides the netstack default (~2h) TCP keepalive
+// idle time for forwarded connections. When a tailnet peer goes away without
+// closing its connections, the forwardTCP io.Copy goroutines block forever and
+// the proxymap entry for the backend's ephemeral port is never released — new
+// dials that the kernel assigns the same port to get RST'd. Under high-churn
+// subnet routing (many short-lived peers, or peers with thousands of proxied
+// connections), the 2h default lets poisoned ports accumulate faster than they
+// clear. See tailscale/tailscale#4522. Value is a Go duration, e.g. "60s".
+var netstackKeepaliveIdle = envknob.RegisterDuration("TS_NETSTACK_TCP_KEEPALIVE_IDLE")
+
 var (
 	serviceIP   = tsaddr.TailscaleServiceIP()
 	serviceIPv6 = tsaddr.TailscaleServiceIPv6()
@@ -1519,6 +1529,12 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 		// fence, the long duration timers are low impact values for battery powered
 		// peers.
 		ep.SocketOptions().SetKeepAlive(true)
+		if d := netstackKeepaliveIdle(); d > 0 {
+			idle := tcpip.KeepaliveIdleOption(d)
+			ep.SetSockOpt(&idle)
+			intvl := tcpip.KeepaliveIntervalOption(d / 4)
+			ep.SetSockOpt(&intvl)
+		}
 
 		// This function is called when we're ready to use the
 		// underlying connection, and thus it's no longer in a
